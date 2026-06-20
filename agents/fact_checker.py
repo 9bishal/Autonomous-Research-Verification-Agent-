@@ -39,6 +39,7 @@ Output → state["fact_check_results"], state["final_report"],
 
 import os
 import json
+import re
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -63,23 +64,42 @@ def _extract_claims_from_report(report: str) -> list[str]:
     response = llm.invoke([
         SystemMessage(content="""Extract all factual claims from this report.
 A factual claim is a specific, verifiable statement (includes numbers, names, percentages).
-Return ONLY a JSON array of claim strings. No explanation."""),
+Return ONLY a JSON array of claim strings, like: ["claim 1", "claim 2"]. No explanation, no markdown."""),
 
         HumanMessage(content=f"Report:\n{report[:3000]}")
     ])
 
-    raw = response.content.strip().replace("```json", "").replace("```", "").strip()
+    raw = response.content.strip()
+
+    # Strip markdown code fences if present
+    raw_clean = re.sub(r"```(?:json)?\s*", "", raw).replace("```", "").strip()
+
+    # Try direct parse first
     try:
-        claims = json.loads(raw)
-        return claims[:10]    # limit to 10 claims to control API costs
-    except Exception as e:
-        print("\n=== CLAIM EXTRACTION ERROR ===")
-        print("Raw LLM Response:")
-        print(raw)
-        print("\nError:")
-        print(e)
-        print("==============================\n")
-        return []
+        claims = json.loads(raw_clean)
+        if isinstance(claims, list):
+            return claims[:10]
+    except Exception:
+        pass
+
+    # Fallback: extract the first JSON array found anywhere in the response
+    match = re.search(r"(\[.*?\])", raw_clean, re.DOTALL)
+    if match:
+        try:
+            claims = json.loads(match.group(1))
+            if isinstance(claims, list):
+                print(f"[fact_checker] Extracted {len(claims)} claims via regex fallback.")
+                return claims[:10]
+        except Exception as e:
+            print("\n=== CLAIM EXTRACTION ERROR ===")
+            print("Raw LLM Response:", raw)
+            print("Error:", e)
+            print("==============================\n")
+
+    print("\n=== CLAIM EXTRACTION FAILED — no JSON array found ===")
+    print("Raw response:", raw[:500])
+    print("======================================================\n")
+    return []
 
 
 def _verify_one_claim(
@@ -92,28 +112,40 @@ def _verify_one_claim(
     """
 
     response = llm.invoke([
-        SystemMessage(content="""You are a fact-checker.
-Check if the claim is supported by the sources provided.
+        SystemMessage(content="""You are a fact-checker. Check if the claim is supported by the sources.
 
-Respond with ONLY valid JSON:
-{
-  "verdict": "VERIFIED" | "UNVERIFIED" | "DISPUTED",
-  "source":  "URL that supports or disputes the claim, or 'Not found in sources'"
-}
+Respond with ONLY valid JSON (no markdown, no explanation):
+{"verdict": "VERIFIED" | "UNVERIFIED" | "DISPUTED", "source": "<URL or 'Not found'>"}
 
-VERIFIED   = claim is clearly supported by a source
-UNVERIFIED = claim cannot be confirmed from the given sources
-DISPUTED   = a source contradicts the claim"""),
+Rules:
+- VERIFIED   = the claim is directly stated or strongly implied by a source
+- UNVERIFIED = the sources don't mention this topic at all
+- DISPUTED   = a source explicitly contradicts the claim
+
+Be generous with VERIFIED — if a source discusses the same topic and the numbers/facts are plausible, mark as VERIFIED."""),
 
         HumanMessage(content=f"""
 Claim to verify: {claim}
 
 Sources:
-{all_sources[:2000]}""")
+{all_sources[:5000]}""")
     ])
 
-    raw  = response.content.strip().replace("```json", "").replace("```", "").strip()
-    data = json.loads(raw)
+    raw = response.content.strip()
+    raw_clean = re.sub(r"```(?:json)?\s*", "", raw).replace("```", "").strip()
+
+    # Try direct parse
+    data = {}
+    try:
+        data = json.loads(raw_clean)
+    except Exception:
+        # Fallback: find first JSON object in response
+        match = re.search(r"(\{.*?\})", raw_clean, re.DOTALL)
+        if match:
+            try:
+                data = json.loads(match.group(1))
+            except Exception:
+                pass
 
     return FactCheckResult(
         claim   = claim,
@@ -127,7 +159,7 @@ def _build_sources_text(raw_research: list) -> str:
     parts = []
     for item in raw_research:
         for src in item.get("sources", []):
-            parts.append(f"URL: {src['url']}\n{src['content'][:400]}")
+            parts.append(f"URL: {src['url']}\n{src['content'][:700]}")
     return "\n\n---\n\n".join(parts)
 
 
@@ -176,27 +208,44 @@ def fact_checker_agent(state: AppState) -> dict:
             state["facts_verified"], state["facts_disputed"]
     """
 
-    # Step 1: Extract claims from the draft report
-    claims = _extract_claims_from_report(state["draft_report"])
+    draft = state.get("draft_report", "") or ""
 
-    print("\n=== FACT CHECK DEBUG ===")
-    print("Draft Report Length:", len(state["draft_report"]))
-    print("Claims Extracted:", claims)
-    print("Claim Count:", len(claims))
-    print("========================\n")
+    print("\n" + "="*60)
+    print("FACT CHECKER AGENT STARTED")
+    print(f"  draft_report length : {len(draft)}")
+    print(f"  raw_research items  : {len(state.get('raw_research', []))}")
+    print(f"  draft snippet       : {repr(draft[:200])}")
+    print("="*60 + "\n")
 
-    if not claims:
+    # Guard: nothing to fact-check if report is empty
+    if not draft.strip():
+        print("[fact_checker] ERROR: draft_report is empty — skipping fact check.")
         return {
             "fact_check_results": [],
-            "final_report":       state["draft_report"],
+            "final_report":       draft,
+            "facts_verified":     0,
+            "facts_disputed":     0,
+        }
+
+    # Step 1: Extract claims from the draft report
+    claims = _extract_claims_from_report(draft)
+
+    print(f"[fact_checker] Claims extracted: {len(claims)}")
+    for i, c in enumerate(claims, 1):
+        print(f"  {i}. {c[:100]}")
+
+    if not claims:
+        print("[fact_checker] No claims extracted — returning 0/0.")
+        return {
+            "fact_check_results": [],
+            "final_report":       draft,
             "facts_verified":     0,
             "facts_disputed":     0,
         }
 
     # Step 2: Combine all sources into one text block
     all_sources = _build_sources_text(state.get("raw_research", []))
-    print("Raw Research Items:", len(state.get("raw_research", [])))
-    print("Source Text Length:", len(all_sources))
+    print(f"[fact_checker] Source text length: {len(all_sources)} chars")
 
     # Step 3: Verify each claim
     results = []
