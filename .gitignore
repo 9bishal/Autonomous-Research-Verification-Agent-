@@ -52,5 +52,13 @@ Thumbs.db
 *.bak
 *.swp
 
+# Docker files (not needed for Streamlit Cloud deployment)
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Test files (not part of deployment)
+test_run.py
+
 # Documentation files
 docs/HOW_TO_EXPLAIN.md
