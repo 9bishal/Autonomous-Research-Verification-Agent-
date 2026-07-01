@@ -29,14 +29,12 @@ Output → state["raw_research"]  (list of {subtask, sources})
 
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dotenv import load_dotenv
 from tavily import TavilyClient
 from graph.state import AppState, SubtaskResult
-
-load_dotenv()
+from graph.config import get_secret
 
 # ── Tavily client setup ────────────────────────────────────────────────────────
-tavily = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
+tavily = TavilyClient(api_key=get_secret("TAVILY_API_KEY"))
 
 
 def _search_one_subtask(subtask: str) -> SubtaskResult:

@@ -26,18 +26,16 @@ Output → state["structured_insights"]
 """
 
 import os
-from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage, HumanMessage
 from graph.state import AppState
-
-load_dotenv()
+from graph.config import get_secret
 
 # ── LLM setup ─────────────────────────────────────────────────────────────────
 llm = ChatGroq(
     model="llama-3.3-70b-versatile",
     temperature=0,
-    api_key=os.getenv("GROQ_API_KEY"),
+    api_key=get_secret("GROQ_API_KEY"),
 )
 
 

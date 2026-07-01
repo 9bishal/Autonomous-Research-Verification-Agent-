@@ -40,18 +40,16 @@ Output → state["fact_check_results"], state["final_report"],
 import os
 import json
 import re
-from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage, HumanMessage
 from graph.state import AppState, FactCheckResult
-
-load_dotenv()
+from graph.config import get_secret
 
 # ── LLM setup ─────────────────────────────────────────────────────────────────
 llm = ChatGroq(
     model="llama-3.3-70b-versatile",
     temperature=0,            # deterministic — important for fact-checking
-    api_key=os.getenv("GROQ_API_KEY"),
+    api_key=get_secret("GROQ_API_KEY"),
 )
 
 

@@ -16,10 +16,6 @@ import uuid
 import re
 import streamlit as st
 import plotly.graph_objects as go
-from dotenv import load_dotenv
-
-# Load environment variables at startup
-load_dotenv()
 
 from graph.workflow import research_graph
 
@@ -267,25 +263,29 @@ if st.session_state.phase == "input":
             slots[k] = cols[i].empty()
             slots[k].info(f"{icon} **{label}**\n\nWaiting...")
 
-        with st.status("Running research pipeline...", expanded=True) as status:
-            for event in research_graph.stream(
-                {"topic": topic.strip()},
-                config=config,
-            ):
-                node = list(event.keys())[0]
-                if node in node_labels:
-                    icon, label, desc = node_labels[node]
-                    st.write(f"{icon} **{label}** — {desc}")
-                    slots[node].success(f"{icon} **{label}**\n\n✅ Done")
+        try:
+            with st.status("Running research pipeline...", expanded=True) as status:
+                for event in research_graph.stream(
+                    {"topic": topic.strip()},
+                    config=config,
+                ):
+                    node = list(event.keys())[0]
+                    if node in node_labels:
+                        icon, label, desc = node_labels[node]
+                        st.write(f"{icon} **{label}** — {desc}")
+                        slots[node].success(f"{icon} **{label}**\n\n✅ Done")
 
-            status.update(
-                label="⏸ Pipeline paused — waiting for your review",
-                state="complete"
-            )
+                status.update(
+                    label="⏸ Pipeline paused — waiting for your review",
+                    state="complete"
+                )
 
-        st.session_state.graph_state = research_graph.get_state(config).values
-        st.session_state.phase = "review"
-        st.rerun()
+            st.session_state.graph_state = research_graph.get_state(config).values
+            st.session_state.phase = "review"
+            st.rerun()
+        except Exception as e:
+            st.error(f"Research pipeline failed: {e}")
+            st.info("Check your API keys in Streamlit Cloud secrets (GROQ_API_KEY, TAVILY_API_KEY).")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -323,44 +323,47 @@ elif st.session_state.phase == "review":
 
     with col_approve:
         if st.button("✅ Approve — Generate Report", type="primary"):
-            with st.status("Generating report + fact-checking...", expanded=True) as status:
+            try:
+                with st.status("Generating report + fact-checking...", expanded=True) as status:
 
-                node_labels = {
-                    "human_review": ("⏸", "Human Review",  "Processing approval..."),
-                    "writer":       ("✍️", "Writer",        "Writing structured report..."),
-                    "fact_checker": ("✅", "Fact Checker",  "Validating every claim..."),
-                }
-                cols2 = st.columns(3)
-                slots2 = {}
-                for i, (k, (icon, label, _)) in enumerate(node_labels.items()):
-                    slots2[k] = cols2[i].empty()
-                    slots2[k].info(f"{icon} **{label}**\n\nWaiting...")
+                    node_labels = {
+                        "human_review": ("⏸", "Human Review",  "Processing approval..."),
+                        "writer":       ("✍️", "Writer",        "Writing structured report..."),
+                        "fact_checker": ("✅", "Fact Checker",  "Validating every claim..."),
+                    }
+                    cols2 = st.columns(3)
+                    slots2 = {}
+                    for i, (k, (icon, label, _)) in enumerate(node_labels.items()):
+                        slots2[k] = cols2[i].empty()
+                        slots2[k].info(f"{icon} **{label}**\n\nWaiting...")
 
-                # Update graph state with approval details before resuming
-                research_graph.update_state(
-                    config,
-                    {
-                        "human_approved": True,
-                        "human_feedback": feedback.strip(),
-                    },
-                    as_node="human_review"
-                )
+                    # Update graph state with approval details before resuming
+                    research_graph.update_state(
+                        config,
+                        {
+                            "human_approved": True,
+                            "human_feedback": feedback.strip(),
+                        },
+                        as_node="human_review"
+                    )
 
-                for event in research_graph.stream(
-                    None,
-                    config=config,
-                ):
-                    node = list(event.keys())[0]
-                    if node in node_labels:
-                        icon, label, desc = node_labels[node]
-                        st.write(f"{icon} **{label}** — {desc}")
-                        slots2[node].success(f"{icon} **{label}**\n\n✅ Done")
+                    for event in research_graph.stream(
+                        None,
+                        config=config,
+                    ):
+                        node = list(event.keys())[0]
+                        if node in node_labels:
+                            icon, label, desc = node_labels[node]
+                            slots2[node].success(f"{icon} **{label}**\n\n{desc} ✅")
 
-                status.update(label="✅ Report complete!", state="complete")
+                    status.update(label="✅ Report complete!", state="complete")
 
-            st.session_state.graph_state = research_graph.get_state(config).values
-            st.session_state.phase = "complete"
-            st.rerun()
+                st.session_state.graph_state = research_graph.get_state(config).values
+                st.session_state.phase = "complete"
+                st.rerun()
+            except Exception as e:
+                st.error(f"Report generation failed: {e}")
+                st.info("Check your API keys in Streamlit Cloud secrets (GROQ_API_KEY, TAVILY_API_KEY).")
 
     with col_reject:
         if st.button("❌ Reject — Start Over"):
@@ -375,28 +378,36 @@ elif st.session_state.phase == "review":
 # ══════════════════════════════════════════════════════════════════════════════
 elif st.session_state.phase == "complete":
 
-    s = st.session_state.graph_state
+    s = st.session_state.graph_state or {}
 
-    verified = s.get("facts_verified", 0)
-    disputed = s.get("facts_disputed", 0)
-    total    = len(s.get("fact_check_results", []))
-    score    = round((verified / total) * 100) if total > 0 else 0
+    if not s.get("final_report"):
+        st.warning("Graph state was reset — please start a new research session.")
+        if st.button("🔄 Start Over"):
+            st.session_state.phase = "input"
+            st.session_state.session_id = str(uuid.uuid4())
+            st.session_state.graph_state = None
+            st.rerun()
+    else:
+        verified = s.get("facts_verified", 0)
+        disputed = s.get("facts_disputed", 0)
+        total    = len(s.get("fact_check_results", []))
+        score    = round((verified / total) * 100) if total > 0 else 0
 
-    # Top metrics
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Research Subtasks",  len(s.get("subtasks", [])))
-    c2.metric("Sources Consulted",  len(s.get("subtasks", [])) * 3)
-    c3.metric("Facts Verified",     f"{verified} / {total}")
-    c4.metric("Fact-Check Score",   f"{score}%",
-              delta="✅ Verified" if score >= 70 else "⚠️ Review needed")
+        # Top metrics
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Research Subtasks",  len(s.get("subtasks", [])))
+        c2.metric("Sources Consulted",  len(s.get("subtasks", [])) * 3)
+        c3.metric("Facts Verified",     f"{verified} / {total}")
+        c4.metric("Fact-Check Score",   f"{score}%",
+                  delta="✅ Verified" if score >= 70 else "⚠️ Review needed")
 
-    st.divider()
+        st.divider()
 
     # Tabs
     tab1, tab2, tab3 = st.tabs(["📄 Final Report", "✅ Fact-Check Details", "🔍 Research Plan"])
 
     with tab1:
-        st.markdown(s.get("final_report", ""))
+        st.markdown(s.get("final_report", "") or "")
 
         col_dl1, col_dl2 = st.columns([1, 5])
         with col_dl1:
